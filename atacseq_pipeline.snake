@@ -5,10 +5,10 @@ EXTS = ['1.bt2', '2.bt2', '3.bt2', '4.bt2', 'rev.1.bt2', 'rev.2.bt2']
 
 rule all:
     input:
-        expand("samples/{accession}_{read}.fastq.gz", accession=FILES, read=READS),
-        expand("results/genome_index_full.{ext}", ext=EXTS),
-        expand("results/{accession}_{pair}.fastq.gz", accession=FILES, pair=PAIR),
-        expand("results/{FILES}_{PAIR}_fastqc.html", FILES=FILES, PAIR=PAIR),
+        #expand("samples/{accession}_{read}.fastq.gz", accession=FILES, read=READS),
+        #expand("results/genome_index_full.{ext}", ext=EXTS),
+        expand("results/{accession}_{pair}.trimmed.fastq.gz", accession=FILES, pair=READS),
+        expand("results/{FILES}_{PAIR}.trimmed_fastqc.html", FILES=FILES, PAIR=READS),
         expand("results/{reps}.bam", reps=FILES),
         expand("results/sorted_{reps}.bam", reps=FILES),
         expand("results/sorted_{reps}.bam.bai", reps=FILES),
@@ -18,15 +18,13 @@ rule all:
         expand("results/shift_{reps}.bam", reps=FILES),
         expand("results/sortedshift_{reps}.bam", reps=FILES),
         expand("results/sortedshift_{reps}.bam.bai", reps=FILES),
-        expand("results/signal_coverage_{FILES}_0_100.png", FILES=FILES),
-        expand("results/signal_coverage_{FILES}_180_247.png", FILES=FILES),
+        #expand("results/signal_coverage_{FILES}_0_100.png", FILES=FILES),
+        #expand("results/signal_coverage_{FILES}_180_247.png", FILES=FILES),
         'results/hist.png',
-        expand("results/{reps}_summits.bed", reps=FILES),
-        #'results/ATAC_intersect.bed',
-        #'results/ATAC_filtered.bed',
-        #'results/ATAC_annotated.bed',
-        #'results/ATAC_motifs',
-        #'results/multiqc_report.html'
+        expand("results/{reps}_peaks.narrowPeak", reps=FILES),
+        'results/ATAC_intersect.bed',
+        'results/ATAC_filtered.bed',
+        'results/multiqc_report.html'
 
 rule wget_hg19:
     output:
@@ -74,35 +72,39 @@ rule bowtie2_build_gencode:
     shell:
         'bowtie2-build --threads {threads} results/hg19.fa.gz results/genome_index_full'
 
-rule trimmomatic:
+rule trimmomatic_pe:
     input:
-        r1 = 'samples/{accession}_R1.fastq.gz',
-        r2 = 'samples/{accession}_R2.fastq.gz'
+        R1='samples/{accession}_R1.fastq.gz',
+        R2='samples/{accession}_R2.fastq.gz'
     output:
-        p1 = 'results/{accession}_FP.fastq.gz',
-        p2 = 'results/{accession}_RP.fastq.gz',
-        u1 = 'results/{accession}_FU.fastq.gz',
-        u2 = 'results/{accession}_RU.fastq.gz'
+        R1='results/{accession}_R1.trimmed.fastq.gz',
+        R2='results/{accession}_R2.trimmed.fastq.gz',
+        R1_unpaired='results/{accession}_R1.unpaired.fastq.gz',
+        R2_unpaired='results/{accession}_R2.unpaired.fastq.gz'
     params:
-        adapter = 'results/NexteraPE-PE.fa'
-    threads: 8
-    conda: 'envs/trimmomatic_env.yml'
-    shell: '''
+        adapters='NexteraPE-PE.fa' 
+    threads: 16
+    conda:
+        'envs/trimmomatic_env.yml'
+    shell:
+        '''
         trimmomatic PE -threads {threads} \
-        {input.r1} {input.r2} \
-        {output.p1} {output.u1} \
-        {output.p2} {output.u2} \
-        ILLUMINACLIP:{params.adapter}:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15
+            -phred33 \
+            {input.R1} {input.R2} \
+            {output.R1} {output.R1_unpaired} \
+            {output.R2} {output.R2_unpaired} \
+            ILLUMINACLIP:{params.adapters}:2:30:10 \
+            LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
         '''
 
 rule fastqc_trim:
     input: 
-        'results/{FILES}_{PAIR}.fastq.gz'
+        'results/{FILES}_{PAIR}.trimmed.fastq.gz'
     output: 
-        'results/{FILES}_{PAIR}_fastqc.html'
+        'results/{FILES}_{PAIR}.trimmed_fastqc.html'
     params: 
         'results/'
-    threads: 4
+    threads: 16
     conda: 
         'envs/fastqc_env.yml'
     shell: 
@@ -112,11 +114,11 @@ rule fastqc_trim:
 
 rule bowtie2_align:
     input:
-        forward_paired = 'results/{accession}_FP.fastq.gz',
-        reverse_paired = 'results/{accession}_RP.fastq.gz'
+        forward_paired = 'results/{accession}_R1.trimmed.fastq.gz',
+        reverse_paired = 'results/{accession}_R2.trimmed.fastq.gz'
     output:
         bam = 'results/{accession}.bam'
-    threads: 32
+    threads: 16
     params:
         'results/genome_index_full'
     conda: 
@@ -125,6 +127,9 @@ rule bowtie2_align:
         '''
         bowtie2 -p {threads} -x {params} -1 {input.forward_paired} -2 {input.reverse_paired} | samtools view -Sb > {output.bam}
         '''
+        
+#Filter mapq30 and remove PCR duplicates
+
 rule samtools_sort:
 	input:
 		bam = 'results/{reps}.bam'
@@ -321,14 +326,14 @@ rule call_peaks:
         name = '{reps}',
         outdir = 'results'
     shell: '''
-        macs3 callpeak -t {input} -f BAM \
+        macs2 callpeak -t {input} -f BAM \
         -n {params.name} --outdir {params.outdir} -g hs --nomodel
         '''
 
 rule intersect_peaks:
     input:
-        a = 'results/SRR16859780_summits.bed',
-        b = 'results/SRR16859779_summits.bed'
+        a = 'results/SRR16859779_peaks.narrowPeak',
+        b = 'results/SRR16859780_peaks.narrowPeak'
     output: 'results/ATAC_intersect.bed'
     conda: 'envs/bedtools_env.yml'
     shell: '''
@@ -348,28 +353,12 @@ rule filter_blacklist:
         bedtools intersect -a {input.peaks} -b {input.blacklist} -v > {output}
         '''
 
-rule annotate_peaks:
+rule multiqc:
     input:
-        filtered = 'results/ATAC_filtered.bed',
-        annotation = 'results/hg19_annotation.gtf'
-    output: 
-        'results/ATAC_annotated.bed'
-    conda: 
-        'envs/homer_env.yml'
-    shell: 
-        '''
-        annotatePeaks.pl {input.filtered} hg19 -gtf {input.annotation} > {output}
-        '''
-
-rule motifs:
-    input:
-        peaks = 'results/ATAC_filtered.bed',
-        genome = 'results/hg19.fa'
-    output: 
-        directory('results/ATAC_motifs')
-    conda: 
-        'envs/homer_env.yml'
-    shell: 
-        '''
-        findMotifsGenome.pl {input.peaks} {input.genome} {output} -size 200
-        '''
+        expand('results/flagstat_{accession}.txt', accession=FILES)
+    output:
+        'results/multiqc_report.html'
+    conda:
+        'envs/multiqc_env.yml'
+    shell:
+        'multiqc results/ -o . -n results/multiqc_report.html'
